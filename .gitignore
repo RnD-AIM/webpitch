@@ -1,0 +1,10 @@
+node_modules/
+.env
+output/
+*.png
+*.jpg
+*.jpeg
+ui-ux-pro-max/data/
+__pycache__/
+*.pyc
+.DS_Store
