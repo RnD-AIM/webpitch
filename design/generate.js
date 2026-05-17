@@ -1,12 +1,9 @@
 import Anthropic from '@anthropic-ai/sdk';
-import OpenAI from 'openai';
 import axios from 'axios';
-import { writeFile, mkdir } from 'fs/promises';
-import { exec } from 'child_process';
-import { promisify } from 'util';
+import { writeFile, readFile, mkdir } from 'fs/promises';
+import { execFile } from 'child_process';
 import path from 'path';
 
-const execAsync = promisify(exec);
 
 const claude = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
@@ -14,15 +11,18 @@ const claude = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 async function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-async function callClaude(params, retries = 3) {
+async function callClaude(params, retries = 5) {
     for (let i = 0; i < retries; i++) {
         try {
             return await claude.messages.create(params);
         } catch (err) {
             const is403 = err.status === 403 || err.message?.includes('403');
-            if (is403 && i < retries - 1) {
-                const wait = (i + 1) * 60000;
-                console.log(`    Cloudflare block attempt ${i + 1}, retrying in ${wait / 1000}s...`);
+            const is429 = err.status === 429 || err.message?.includes('429');
+            const isCredit = err.status === 400 && err.message?.includes('credit balance');
+            if (isCredit) throw new Error('Anthropic account out of credits — add credits at console.anthropic.com');
+            if ((is403 || is429) && i < retries - 1) {
+                const wait = is429 ? 70000 + i * 30000 : (i + 1) * 60000;
+                console.log(`    ${is429 ? 'Rate limit (429)' : 'Cloudflare block (403)'} attempt ${i + 1}, retrying in ${wait / 1000}s...`);
                 await sleep(wait);
                 continue;
             }
@@ -38,20 +38,69 @@ function extractJSON(text) {
     return JSON.parse(text.slice(start, end + 1));
 }
 
+function escapeHtml(str) {
+    return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+// Walk a content object and return all leaf paths as dot-notation strings
+// Used to build the placeholder schema sent to generatePageTemplate
+function buildPlaceholderSchema(sections) {
+    function walk(obj, prefix) {
+        if (obj == null) return [];
+        if (Array.isArray(obj)) {
+            return obj.flatMap((item, i) => walk(item, `${prefix}.${i}`));
+        }
+        if (typeof obj === 'object') {
+            return Object.entries(obj).flatMap(([k, v]) => {
+                const fullPath = `${prefix}.${k}`;
+                if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') {
+                    return [fullPath];
+                }
+                return walk(v, fullPath);
+            });
+        }
+        return [];
+    }
+    return sections.flatMap(s => walk(s.content, s.type));
+}
+
+// Inject content into HTML template — resolves {{section_type.field}} paths from sections array
+function renderTemplate(html, sections) {
+    const byType = {};
+    for (const s of sections) byType[s.type] = s.content;
+
+    const rendered = html.replace(/\{\{([^}]+)\}\}/g, (match, path) => {
+        const parts = path.trim().split('.');
+        let val = byType;
+        for (const part of parts) {
+            if (val == null) return '';
+            val = Array.isArray(val) ? val[parseInt(part)] : val[part];
+        }
+        return val != null ? escapeHtml(String(val)) : '';
+    });
+
+    const remaining = rendered.match(/\{\{[^}]+\}\}/g);
+    if (remaining) {
+        console.warn(`    ⚠ ${remaining.length} unresolved placeholder(s): ${remaining.slice(0, 5).join(', ')}`);
+    }
+    return rendered;
+}
+
 // Query the ui-ux-pro-max design intelligence database
 // domain: 'color' | 'typography' | 'style' | 'ux' | 'landing'
 async function queryUXPro(query, domain, n = 1) {
-    try {
-        const safeQuery = query.replace(/"/g, '').slice(0, 60);
-        const { stdout } = await execAsync(
-            `python3 /opt/webpitch/ui-ux-pro-max/scripts/search.py "${safeQuery}" --domain ${domain} -n ${n}`,
-            { timeout: 10000 }
-        );
-        // Strip the header lines, return just the result body
-        return stdout.replace(/^##.*\n.*\n.*\n/, '').trim();
-    } catch (err) {
-        return ''; // fail silently — prompts work without it
-    }
+    return new Promise((resolve) => {
+        const safeQuery = String(query).slice(0, 60);
+        execFile('python3', ['/opt/webpitch/ui-ux-pro-max/scripts/search.py', safeQuery, '--domain', domain, '-n', String(n)], { timeout: 10000 }, (err, stdout) => {
+            if (err) { resolve(''); return; }
+            resolve(stdout.replace(/^##.*\n.*\n.*\n/, '').trim());
+        });
+    });
 }
 
 // ── defaults ───────────────────────────────────────────────────────────────
@@ -120,7 +169,7 @@ Minimal footer: centered, just logo + links + copyright, lots of whitespace.`,
 ];
 
 // ── HERO IMAGE ─────────────────────────────────────────────────────────────
-// Primary: OpenAI gpt-image-1. Fallback: Gemini Imagen 3.
+// Hero image via Gemini Imagen 4 (gpt-image-1 skipped — OpenAI billing exhausted)
 
 async function generateHeroImage(businessName, businessType, palette, designStyle) {
     const prompt = `Professional website hero background for ${businessType} business "${businessName}".
@@ -128,26 +177,8 @@ Abstract composition, no text, no faces. Photorealistic. ${designStyle.css_perso
 Color palette inspiration: ${palette.primary}, ${palette.secondary}, ${palette.accent}.
 Wide landscape 16:9. Suitable as a full-width website hero background.`;
 
-    // Try gpt-image-1 first
-    try {
-        const openaiClient = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-        const response = await openaiClient.images.generate({
-            model: 'gpt-image-1',
-            prompt,
-            size: '1536x1024',
-            quality: 'high',
-            n: 1,
-        });
-        const b64 = response.data[0].b64_json;
-        if (!b64) throw new Error('No b64_json in gpt-image-1 response');
-        console.log(`      Hero image via gpt-image-1.`);
-        return b64;
-    } catch (err) {
-        console.log(`      gpt-image-1 failed (${err.message?.slice(0, 60)}), trying Gemini Imagen...`);
-    }
-
-    // Fallback: Gemini Imagen 3
-    const imagenUrl = `https://generativelanguage.googleapis.com/v1beta/models/imagen-3.0-generate-001:predict?key=${process.env.GEMINI_API_KEY}`;
+    // Gemini Imagen 4 (OpenAI billing exhausted)
+    const imagenUrl = `https://generativelanguage.googleapis.com/v1beta/models/imagen-4.0-fast-generate-001:predict?key=${process.env.GEMINI_API_KEY}`;
     const resp = await axios.post(imagenUrl, {
         instances: [{ prompt }],
         parameters: { sampleCount: 1, aspectRatio: '16:9', outputMimeType: 'image/jpeg' },
@@ -155,32 +186,48 @@ Wide landscape 16:9. Suitable as a full-width website hero background.`;
 
     const b64 = resp.data.predictions?.[0]?.bytesBase64Encoded;
     if (!b64) throw new Error('No image data from Gemini Imagen either');
-    console.log(`      Hero image via Gemini Imagen 3.`);
+    console.log(`      Hero image via Gemini Imagen 4.`);
     return b64;
 }
 
 // ── PALETTE SUGGESTION ─────────────────────────────────────────────────────
 
 async function suggestPalettes(analysis, existingColors) {
-    const gemini = new OpenAI({
-        apiKey: process.env.GEMINI_API_KEY,
-        baseURL: 'https://generativelanguage.googleapis.com/v1beta/openai/',
-    });
-    const resp = await gemini.chat.completions.create({
-        model: 'gemini-1.5-flash',
-        max_tokens: 800,
-        messages: [{
-            role: 'user',
-            content: `Suggest 3 distinct color palettes for a ${analysis.businessType} website redesign.
-Tone: ${analysis.tone}. Color personality: ${analysis.colorPersonality}.
-Existing colors to consider: ${(existingColors || []).slice(0, 10).join(', ')}.
+    // Filter: skip transparent/near-white/near-black — keep the meaningful brand colors
+    const colorHints = (existingColors || [])
+        .filter(c => !c.includes('rgba(0') && c !== 'rgb(255, 255, 255)' && c !== 'rgb(0, 0, 0)' && c !== 'rgb(238, 238, 238)')
+        .slice(0, 15)
+        .join(', ');
+
+    const resp = await axios.post(
+        'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions',
+        {
+            model: 'gemini-flash-latest',
+            max_tokens: 800,
+            messages: [{
+                role: 'user',
+                content: `Suggest 3 distinct color palettes for a ${analysis.businessType} website redesign.
+Tone: ${analysis.tone}. Color personality: ${analysis.colorPersonality || 'professional'}.
+EXISTING SITE COLORS extracted from the current site's CSS: ${colorHints || 'none detected'}.
+Derive palettes that feel like improved evolutions of those colors — preserve the brand feel while making it more modern.
+Each palette must be meaningfully different from the others (not just brightness variations).
 Return ONLY valid JSON:
 {"palettes":[{"name":"...","concept":"...","primary":"#hex","secondary":"#hex","accent":"#hex","background":"#hex","surface":"#hex","text":"#hex","dark":"#hex"}]}`,
-        }],
-    });
-    const text = resp.choices[0].message.content.trim()
-        .replace(/^```json\n?/, '').replace(/\n?```$/, '');
-    return JSON.parse(text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1)).palettes;
+            }],
+        },
+        {
+            headers: {
+                'Authorization': `Bearer ${process.env.GEMINI_API_KEY}`,
+                'Content-Type': 'application/json',
+            },
+            timeout: 30000,
+        }
+    );
+    const raw = resp.data.choices[0].message.content?.trim() || '';
+    const text = raw.replace(/^```json\n?/, '').replace(/\n?```$/, '');
+    const parsed = JSON.parse(text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1));
+    if (!parsed.palettes || parsed.palettes.length < 3) throw new Error('Not enough palettes in response');
+    return parsed.palettes;
 }
 
 // ── STEP 1: SITEMAP (two-phase, one small call + one per page) ────────────
@@ -309,40 +356,41 @@ async function generateSitemap(analysis, crawlData) {
 
 // ── STEP 1.5: CONTENT ENRICHMENT ──────────────────────────────────────────
 
-// One cheap GPT-4o-mini call fills all section text across all pages.
+// Claude Haiku call fills all section text across all pages.
 // Returns the same sitemap structure with abstract descriptions replaced by real copy.
 // Saved to content.json so it can be reused or inspected independently.
 async function enrichContent(sitemap, analysis, crawlData) {
-    const openaiClient = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
+    // Enrich one page at a time to avoid JSON truncation on large sitemaps.
+    // Each page call is small enough that Haiku reliably returns valid JSON.
     const rawContent = [
         crawlData.headings?.slice(0, 10).join(' | '),
         crawlData.ctas?.slice(0, 6).join(' | '),
         (crawlData.paragraphs || []).slice(0, 3).join(' '),
     ].filter(Boolean).join('\n');
 
-    const resp = await openaiClient.chat.completions.create({
-        model: 'gpt-4o-mini',
-        max_tokens: 4096,
-        messages: [{
-            role: 'system',
-            content: 'You are a professional copywriter. Return ONLY valid JSON. No markdown. No explanation.',
-        }, {
-            role: 'user',
-            content: `Write real, polished website copy for every section of this ${analysis.businessType} website.
-
-BUSINESS: ${analysis.businessName}
+    const businessCtx = `BUSINESS: ${analysis.businessName}
 Location: ${analysis.location || 'not specified'}
 Offerings: ${analysis.primaryOfferings.join(', ')}
 Competitive advantage: ${analysis.competitiveAdvantage}
 Tone: ${analysis.tone}
 Target audience: ${analysis.targetAudience}
 
-EXISTING SITE CONTENT — use as source material, improve and adapt, do not copy verbatim:
-${rawContent}
+EXISTING SITE CONTENT (source material — improve and adapt, do not copy verbatim):
+${rawContent}`;
 
-SITEMAP — replace every abstract description with real, compelling copy:
-${JSON.stringify(sitemap, null, 2)}
+    const enrichedPages = await Promise.all(sitemap.pages.map(async (page) => {
+        const resp_enrich = await claude.messages.create({
+            model: 'claude-haiku-4-5-20251001',
+            max_tokens: 4000,
+            system: 'You are a professional copywriter. Return ONLY valid JSON. No markdown. No explanation.',
+            messages: [{
+                role: 'user',
+                content: `Write real, polished website copy for this single page of a ${analysis.businessType} website.
+
+${businessCtx}
+
+PAGE TO ENRICH:
+${JSON.stringify(page, null, 2)}
 
 Descriptions to replace look like: "bold 7-word main value prop headline", "30-word testimonial about a specific benefit", "emoji + 3-word label", "relevant number", etc.
 
@@ -356,13 +404,16 @@ Rules:
 - Do NOT change JSON keys, arrays, structure, or non-abstract values (like "map_placeholder": true)
 - Every field that contains an abstract description must be replaced with actual text
 
-Return the exact same JSON structure with every abstract description replaced by real content.`,
-        }],
-    });
+Return the exact same JSON structure for this page with every abstract description replaced by real content.`,
+            }],
+        });
 
-    const text = resp.choices[0].message.content.trim()
-        .replace(/^```json\n?/, '').replace(/\n?```$/, '').trim();
-    return JSON.parse(text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1));
+        const text = resp_enrich.content[0].text.trim()
+            .replace(/^```json\n?/, '').replace(/\n?```$/, '').trim();
+        return JSON.parse(text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1));
+    }));
+
+    return { ...sitemap, pages: enrichedPages };
 }
 
 // ── STEP 2: DESIGN SYSTEM CSS ──────────────────────────────────────────────
@@ -409,7 +460,8 @@ Include these sections in order:
 10. Form: .form-group (margin-bottom 20px), label, input/textarea/select (full width, border, radius, padding 12px 16px, focus ring in primary color), .form-row (2-col grid)
 11. Footer: footer (dark background, light text), .footer-inner (grid 4 cols), .footer-logo, .footer-links (flex col, gap 8px), .footer-bottom (border-top, flex between, small text)
 12. Animations: @keyframes fadeUp (translateY 24px → 0, opacity 0 → 1), .animate (opacity 0, translateY 24px), .animate.visible (opacity 1, translateY 0, transition 0.6s ease)
-13. Responsive @media (max-width: 768px): stack grids to 1col, hide nav-links, reduce heading sizes, adjust section padding
+
+NOTE: Do NOT include @media queries. Responsive CSS is generated separately.
 
 The CSS should produce designs that look premium, modern, and agency-quality.
 Return ONLY the raw CSS. No markdown, no backticks, no explanation.`,
@@ -418,59 +470,163 @@ Return ONLY the raw CSS. No markdown, no backticks, no explanation.`,
     return resp.content[0].text.trim().replace(/^```css\n?/, '').replace(/\n?```$/, '');
 }
 
-// ── STEP 3: GENERATE ONE PAGE ──────────────────────────────────────────────
+// ── STEP 2.5: RESPONSIVE CSS (separate call — keeps base CSS call focused) ─
 
-async function generatePageHTML(page, sitemap, palette, analysis, designStyle, heroImageBase64, uxIntel) {
+async function generateResponsiveCSS(designCSS, analysis, palette) {
+    const resp = await callClaude({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 4000,
+        messages: [{
+            role: 'user',
+            content: `Below is the base CSS design system for a ${analysis.businessType} website.
+Write ONLY the @media query blocks that make it fully responsive on mobile.
+
+REQUIREMENTS (must address all of these):
+- Stack .grid-2, .grid-3, .grid-4 to 1 column
+- Hamburger nav: on mobile, show .hamburger button (display:block) and hide .nav-links + .nav-cta by default. When #navLinks has class "open", show it as a vertical dropdown (position:absolute, top:72px, left:0, right:0, flex-direction:column, background = dark var, z-index:200). This is the mobile nav system — do NOT skip this.
+- Reduce h1 by ~30% on mobile (use smaller clamp or fixed size)
+- Reduce .section padding to 48px 0 (was 96px)
+- .container: padding 0 16px
+- Hero: center text, reduce min-height to 70vh
+- .btn: full width on mobile (width:100%)
+- Cards (.card): full width, padding 20px
+- Footer .footer-inner: 1 column, gap 24px
+- Stats band: 2 columns (grid-template-columns: 1fr 1fr)
+
+OUTPUT: Return ONLY @media (max-width: 768px) { ... } and optionally @media (max-width: 480px) { ... }.
+No explanation. No other CSS.
+
+BASE CSS (first 8000 chars):
+${designCSS.slice(0, 8000)}`,
+        }],
+    });
+    const llmCSS = resp.content[0].text.trim()
+        .replace(/^```css\n?/, '').replace(/\n?```$/, '');
+
+    // Guaranteed hamburger rules — appended after LLM output so they can't be omitted
+    const hamburgerCSS = `
+/* ── Mobile nav guaranteed rules ── */
+@media (max-width: 768px) {
+  .hamburger { display: block !important; }
+  #navLinks { display: none !important; }
+  #navLinks.open {
+    display: flex !important;
+    flex-direction: column;
+    position: absolute;
+    top: 72px;
+    left: 0;
+    right: 0;
+    background: var(--dark, #0f172a);
+    padding: 16px 24px;
+    gap: 12px;
+    z-index: 200;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.3);
+  }
+  #navLinks.open a { color: #fff !important; padding: 4px 0; }
+  .nav-cta { display: none !important; }
+}`;
+
+    return llmCSS + hamburgerCSS;
+}
+
+// ── STEP 3: GENERATE ONE PAGE (template + injection) ──────────────────────
+
+async function generatePageHTML(page, sitemap, palette, analysis, designStyle, heroImageBase64, uxIntel, logoUrl, imageUrls) {
     const isHome = page.id === 'index';
+
+    const heroStyle = isHome && heroImageBase64
+        ? `background: linear-gradient(rgba(${parseInt(palette.dark?.slice(1,3) || '0f', 16)},${parseInt(palette.dark?.slice(3,5) || '17', 16)},${parseInt(palette.dark?.slice(5,7) || '2a', 16)},0.72), rgba(0,0,0,0.5)), url('./hero.jpg') center/cover no-repeat;`
+        : `background: linear-gradient(135deg, ${palette.dark || palette.secondary} 0%, ${palette.primary} 60%, ${palette.accent}44 100%);`;
+
+    // Deterministic nav — LLM copies this verbatim. Logo + hamburger + links + CTA.
     const navLinks = sitemap.pages.map(p =>
         `<a href="${p.filename}" class="${p.id === page.id ? 'active' : ''}">${p.navLabel}</a>`
     ).join('\n      ');
+    const logoImg = logoUrl
+        ? `<img src="${logoUrl}" alt="${analysis.businessName}" style="height:48px;width:auto;object-fit:contain;display:block;">`
+        : `<strong class="nav-logo">${analysis.businessName}</strong>`;
+    const navBlock = `<nav>
+  <div class="nav-inner container">
+    <a href="index.html" style="text-decoration:none;">${logoImg}</a>
+    <button class="hamburger" id="menuBtn" aria-label="Abrir menú" style="display:none;background:none;border:none;font-size:1.6rem;cursor:pointer;color:inherit;padding:4px 8px;">☰</button>
+    <div class="nav-links" id="navLinks">
+      ${navLinks}
+    </div>
+    <a href="contact.html" class="btn btn-primary btn-sm nav-cta">Contáctanos</a>
+  </div>
+</nav>`;
 
-    const heroStyle = isHome && heroImageBase64
-        ? `background: linear-gradient(rgba(${parseInt(palette.dark?.slice(1,3) || '0f', 16)},${parseInt(palette.dark?.slice(3,5) || '17', 16)},${parseInt(palette.dark?.slice(5,7) || '2a', 16)},0.72), rgba(0,0,0,0.5)), url('data:image/jpeg;base64,${heroImageBase64}') center/cover no-repeat;`
-        : `background: linear-gradient(135deg, ${palette.dark || palette.secondary} 0%, ${palette.primary} 60%, ${palette.accent}44 100%);`;
+    // Build placeholder schema from section structure — LLM uses these paths, not actual content
+    const schema = buildPlaceholderSchema(page.sections);
+    const schemaBlock = schema.map(p => `  {{${p}}}`).join('\n');
+
+    // Existing site images the LLM can use instead of gradient placeholders
+    const imagesBlock = imageUrls && imageUrls.length > 0
+        ? `\nEXISTING SITE IMAGES — use these as <img src="..."> instead of gradient placeholders where an image is needed:\n${imageUrls.slice(0, 8).join('\n')}`
+        : '';
 
     const resp = await callClaude({
         model: 'claude-sonnet-4-6',
-        max_tokens: 16000,
+        max_tokens: 8000,
         messages: [{
             role: 'user',
-            content: `Generate complete HTML for the "${page.title}" page of ${analysis.businessName}'s website.
+            content: `Generate a complete HTML TEMPLATE for the "${page.title}" page of ${analysis.businessName}'s website.
+
+THIS IS A TEMPLATE — text fields use placeholders replaced by a script after this call.
+Every text field MUST use a placeholder from the PLACEHOLDER SCHEMA below. Do NOT write actual text copy.
 
 DESIGN STYLE: ${designStyle.name}
 ${designStyle.layout_patterns}
 
-This page links to: <link rel="stylesheet" href="design.css"> — all shared styles are there.
-Only add a <style> tag for styles UNIQUE to this specific page (hero background, section-specific overrides).
+CSS FILES ALREADY LINKED (design.css + responsive.css contain ALL component styles):
+design.css already defines: .container, .section, .btn, .btn-primary, .btn-secondary, .btn-ghost,
+.card, .eyebrow, nav, .nav-inner, .nav-links, .nav-cta, .page-hero, footer, .footer-inner,
+.footer-links, .footer-bottom, .grid-2, .grid-3, .grid-4, .flex, .flex-center, .flex-between,
+.gap-sm/md/lg, .animate, @keyframes fadeUp, form elements.
+
+⛔ DO NOT redefine ANY of those classes in a <style> tag. The ONLY allowed <style> content is:
+${isHome
+    ? `  - Hero background: #hero { ${heroStyle} min-height: 100vh; }`
+    : '  - Nothing. Do NOT include a <style> tag for non-home pages.'}
 
 PALETTE: primary=${palette.primary} secondary=${palette.secondary} accent=${palette.accent} dark=${palette.dark || '#0f172a'} bg=${palette.background}
-${isHome ? `HERO INLINE STYLE: style="${heroStyle}"` : ''}
 
-NAV: Current page = "${page.title}". Mark it active.
-Nav links HTML:
-      ${navLinks}
+NAV — copy this block EXACTLY as-is into the page (do not modify, do not add extra nav):
+${navBlock}
+${imagesBlock}
 
 SECTIONS FOR THIS PAGE:
-${JSON.stringify(page.sections, null, 2)}
+${page.sections.map(s => `- type: ${s.type} (id: ${s.id})`).join('\n')}
 
-${uxIntel?.ux ? `UX INTELLIGENCE FOR THIS BUSINESS TYPE:\n${uxIntel.ux}\nApply these UX guidelines throughout the page.\n` : ''}
-IMPLEMENTATION RULES:
-1. All content is pre-written — use the exact text provided above. Do not rewrite, paraphrase, or invent new copy.
-2. Every section must be visually spectacular — use the layout_patterns guidance above precisely.
-3. Stars ratings: use actual ★ characters (★★★★★).
-4. Avatar initials: colored circle div with CSS (width 48px, height 48px, border-radius 50%, background primary, centered white initial letter).
-5. Stat numbers: CSS clamp(3rem, 6vw, 5rem), bold, accent color.
-6. Hero (home page only): full viewport height (min-height: 100vh), white text, ${isHome ? `use this inline style: ${heroStyle}` : 'page-hero class from design.css'}.
-7. FAQ accordion: use <details><summary> HTML elements for zero-JS accordion.
-8. Image placeholders: use aspect-ratio boxes with gradient fill matching the palette.
-9. Process steps: use the exact number format (01, 02...) from the sitemap.
-10. Footer: dark background, 4 columns (brand | nav links | secondary links | contact), copyright © ${new Date().getFullYear()} ${analysis.businessName}.
-11. Include IntersectionObserver JS at bottom to add class 'visible' to elements with class 'animate'.
-12. Include mobile nav toggle JS (hamburger).
-13. Return ONLY complete HTML from <!DOCTYPE html> to </html>. No explanation, no code fences.`,
+PLACEHOLDER SCHEMA — use EXACTLY these paths for ALL text. No other text allowed.
+${schemaBlock}
+
+${uxIntel?.ux ? `UX INTELLIGENCE:\n${uxIntel.ux}\n` : ''}
+RULES:
+1. Placeholders only for text. Nav links and hrefs use the exact HTML given above (not placeholders).
+2. Stars: ★★★★★ directly (not a placeholder).
+3. Avatar circles: inline div, 48×48px, border-radius 50%, bg primary, white text — use the initial placeholder.
+4. Stat numbers: font-size clamp(3rem,6vw,5rem), bold, color accent.
+5. Hero (home only): use #hero style from above. Other pages: use class="page-hero".
+6. FAQ: <details><summary> elements.
+7. Image placeholders: use existing site images above if available; otherwise gradient div.
+8. Footer: 4-col dark footer, copyright © ${new Date().getFullYear()} ${analysis.businessName}.
+9. IntersectionObserver JS at bottom: adds class "visible" to .animate elements.
+10. Do NOT add a mobile nav script — it is injected automatically after generation.
+11. Return ONLY complete HTML from <!DOCTYPE html> to </html>. No fences, no explanation.`,
         }],
     });
-    return resp.content[0].text.trim().replace(/^```html\n?/, '').replace(/\n?```$/, '');
+    const template = resp.content[0].text.trim().replace(/^```html\n?/, '').replace(/\n?```$/, '');
+
+    // Inject real content from sections into template placeholders
+    let html = renderTemplate(template, page.sections);
+
+    // Inject deterministic mobile nav script — guaranteed to work regardless of LLM output
+    const mobileNavScript = `<script>
+(function(){var b=document.getElementById('menuBtn'),n=document.getElementById('navLinks');if(b&&n){b.addEventListener('click',function(){n.classList.toggle('open');b.textContent=n.classList.contains('open')?'✕':'☰';});}})();
+</script>`;
+    html = html.replace('</body>', mobileNavScript + '\n</body>');
+    return html;
 }
 
 // ── MAIN EXPORT ────────────────────────────────────────────────────────────
@@ -500,20 +656,34 @@ export async function generateDesigns(analysis, crawlData, outputDir) {
     const hasUXIntel = Object.values(uxIntel).some(v => v.length > 0);
     console.log(`  Design intelligence: ${hasUXIntel ? 'loaded' : 'unavailable (will use defaults)'}`);
 
-    // Sitemap — derived from crawled pages, one small call per page
-    console.log('  Generating site architecture (sitemap)...');
-    const sitemap = await generateSitemap(analysis, crawlData);
-    console.log(`  Sitemap: ${sitemap.pages.length} pages — ${sitemap.pages.map(p => p.title).join(', ')}`);
+    // Sitemap — load from cache or generate
+    const sitemapPath = path.join(outputDir, 'sitemap.json');
+    let sitemap;
+    try {
+        sitemap = JSON.parse(await readFile(sitemapPath, 'utf8'));
+        console.log(`  Sitemap loaded from cache (${sitemap.pages.length} pages).`);
+    } catch {
+        console.log('  Generating site architecture (sitemap)...');
+        sitemap = await generateSitemap(analysis, crawlData);
+        await writeFile(sitemapPath, JSON.stringify(sitemap, null, 2));
+        console.log(`  Sitemap: ${sitemap.pages.length} pages — ${sitemap.pages.map(p => p.title).join(', ')}`);
+    }
 
-    // Content enrichment — one GPT-4o-mini call fills all section text, shared across all 3 designs
-    console.log('  Enriching content (GPT-4o-mini)...');
+    // Content enrichment — load from cache or generate
+    const contentPath = path.join(outputDir, 'content.json');
     let enrichedSitemap = sitemap;
     try {
-        enrichedSitemap = await enrichContent(sitemap, analysis, crawlData);
-        await writeFile(path.join(outputDir, 'content.json'), JSON.stringify(enrichedSitemap, null, 2));
-        console.log('  Content enrichment complete, content.json saved.');
-    } catch (err) {
-        console.log(`  Content enrichment failed (${err.message?.slice(0, 80)}), using abstract sitemap as fallback.`);
+        enrichedSitemap = JSON.parse(await readFile(contentPath, 'utf8'));
+        console.log('  Content loaded from cache (content.json).');
+    } catch {
+        console.log('  Enriching content (Claude Haiku)...');
+        try {
+            enrichedSitemap = await enrichContent(sitemap, analysis, crawlData);
+            await writeFile(contentPath, JSON.stringify(enrichedSitemap, null, 2));
+            console.log('  Content enrichment complete, content.json saved.');
+        } catch (err) {
+            console.log(`  Content enrichment failed (${err.message?.slice(0, 80)}), using abstract sitemap as fallback.`);
+        }
     }
 
     const designs = [];
@@ -526,29 +696,61 @@ export async function generateDesigns(analysis, crawlData, outputDir) {
 
         console.log(`\n  ── Design ${i + 1}/3: ${style.name} ──`);
 
-        // Hero image via Gemini Imagen
+        // Hero image via Gemini Imagen — skip if already on disk
         let heroImageBase64 = null;
+        const heroPath = path.join(designDir, 'hero.jpg');
         try {
-            console.log(`    Generating hero image (Gemini Imagen)...`);
-            heroImageBase64 = await generateHeroImage(analysis.businessName, analysis.businessType, palette, style);
-            await writeFile(path.join(designDir, 'hero.jpg'), Buffer.from(heroImageBase64, 'base64'));
-            console.log(`    Hero image generated.`);
-        } catch (err) {
-            console.log(`    Hero image failed (${err.message?.slice(0, 80)}), using CSS gradient.`);
+            await readFile(heroPath);
+            heroImageBase64 = 'cached'; // truthy so ./hero.jpg is referenced in generated HTML
+            console.log(`    Hero image cached, skipping.`);
+        } catch {
+            try {
+                console.log(`    Generating hero image (Gemini Imagen)...`);
+                heroImageBase64 = await generateHeroImage(analysis.businessName, analysis.businessType, palette, style);
+                await writeFile(heroPath, Buffer.from(heroImageBase64, 'base64'));
+                console.log(`    Hero image generated.`);
+            } catch (err) {
+                console.log(`    Hero image failed (${err.message?.slice(0, 80)}), using CSS gradient.`);
+            }
         }
 
-        // Design system CSS
-        console.log(`    Generating design system CSS...`);
-        const css = await generateDesignSystem(analysis, palette, style, uxIntel);
-        await writeFile(path.join(designDir, 'design.css'), css);
-        console.log(`    CSS written (${css.length} bytes).`);
+        // Design system CSS — skip if already on disk
+        const cssPath = path.join(designDir, 'design.css');
+        let css;
+        try {
+            css = await readFile(cssPath, 'utf8');
+            console.log(`    CSS cached, skipping.`);
+        } catch {
+            console.log(`    Generating design system CSS...`);
+            css = await generateDesignSystem(analysis, palette, style, uxIntel);
+            await writeFile(cssPath, css);
+            console.log(`    CSS written (${css.length} bytes).`);
+        }
 
-        // Per-page HTML — receives enriched content, only responsible for layout
+        // Responsive CSS — separate call, separate file (skipped if cached)
+        const responsiveCssPath = path.join(designDir, 'responsive.css');
+        try {
+            await readFile(responsiveCssPath);
+            console.log(`    Responsive CSS cached, skipping.`);
+        } catch {
+            console.log(`    Generating responsive CSS...`);
+            const responsiveCss = await generateResponsiveCSS(css, analysis, palette);
+            await writeFile(responsiveCssPath, responsiveCss);
+            console.log(`    Responsive CSS written (${responsiveCss.length} bytes).`);
+        }
+
+        // Per-page HTML — skip pages already on disk
         for (const page of enrichedSitemap.pages) {
+            const pagePath = path.join(designDir, page.filename);
+            try {
+                await readFile(pagePath);
+                console.log(`    ${page.filename} cached, skipping.`);
+                continue;
+            } catch { /* generate */ }
             console.log(`    Generating ${page.title} page...`);
             const useHero = page.id === 'index' ? heroImageBase64 : null;
-            const html = await generatePageHTML(page, enrichedSitemap, palette, analysis, style, useHero, uxIntel);
-            await writeFile(path.join(designDir, page.filename), html);
+            const html = await generatePageHTML(page, enrichedSitemap, palette, analysis, style, useHero, uxIntel, crawlData.logoUrl, crawlData.imageUrls);
+            await writeFile(pagePath, html);
             console.log(`    ${page.filename} written (${html.length} bytes, divs: ${(html.match(/<div/g) || []).length}).`);
         }
 

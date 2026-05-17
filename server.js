@@ -6,6 +6,9 @@ import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
+
+// Job slot limiter — max 1 concurrent pipeline
+let _jobRunning = false;
 app.use(express.json());
 
 app.use('/output', express.static('/opt/webpitch/output'));
@@ -20,12 +23,18 @@ app.post('/api/analyze', (req, res) => {
 
     const { url, email, telegramUser } = req.body;
     if (!url) return res.status(400).json({ error: 'url is required' });
+    try { new URL(url); } catch { return res.status(400).json({ error: 'invalid URL format' }); }
 
     const recipientEmail = email || process.env.DEFAULT_EMAIL;
+    if (_jobRunning) {
+        return res.status(429).json({ error: 'Pipeline busy. Try again in ~40 minutes.', retryAfterSeconds: 2400 });
+    }
+    _jobRunning = true;
     const jobId = randomUUID();
 
-    runPipeline(jobId, url, recipientEmail, telegramUser || {}).catch(err => {
+    runPipeline(jobId, url, recipientEmail, telegramUser || {}).then(() => { _jobRunning = false; }).catch(err => {
         console.error(`Pipeline failed for job ${jobId}:`, err.message);
+        _jobRunning = false;
     });
 
     console.log(`[${jobId}] Started pipeline for ${url} → ${recipientEmail}`);
@@ -38,7 +47,12 @@ app.post('/api/analyze', (req, res) => {
     });
 });
 
+export { app };
+export function _resetJobState() { _jobRunning = false; }
+
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => {
-    console.log(`Webpitch server running on port ${PORT}`);
-});
+if (process.env.NODE_ENV !== 'test') {
+    app.listen(PORT, () => {
+        console.log(`Webpitch server running on port ${PORT}`);
+    });
+}

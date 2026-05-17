@@ -1,18 +1,29 @@
 import { chromium } from 'playwright';
 
+// Expanded heading selector: catches standard tags, Bootstrap .h1/.h2/.h3, and common CMS title classes
+const HEADING_SEL = 'h1, h2, h3, h4, .h1, .h2, .h3, [class*="section-title" i], [class*="entry-title" i], [class*="page-title" i], [class*="block-title" i]';
+
 // Lightweight per-page extraction — headings, paragraphs, CTAs only
 async function extractPageContent(page) {
-    return page.evaluate(() => {
+    // Scroll to reveal lazy-loaded / intersection-observer-hidden content
+    await page.evaluate(() => { window.scrollTo(0, document.body.scrollHeight); });
+    await page.waitForTimeout(500);
+    await page.evaluate(() => { window.scrollTo(0, 0); });
+
+    return page.evaluate((headingSel) => {
         const getText = sel => [...document.querySelectorAll(sel)]
-            .map(el => el.innerText?.trim()).filter(Boolean);
+            .map(el => (el.innerText || el.textContent)?.trim()).filter(Boolean);
+        // Deduplicate headings (Bootstrap .h2 on a <p> may duplicate a nearby <h2>)
+        const rawHeadings = getText(headingSel);
+        const headings = [...new Set(rawHeadings)].slice(0, 12);
         return {
             url: location.href,
             title: document.title,
-            headings: getText('h1,h2,h3').slice(0, 12),
+            headings,
             paragraphs: getText('p').filter(t => t.length > 30).slice(0, 15),
             ctas: getText('button,.btn,[class*="cta"],[class*="button"]').slice(0, 8),
         };
-    });
+    }, HEADING_SEL);
 }
 
 export async function crawlSite(url) {
@@ -29,11 +40,18 @@ export async function crawlSite(url) {
 
     await page.waitForTimeout(2000);
 
-    // Full homepage extraction (unchanged from original)
-    const data = await page.evaluate(() => {
-        const getText = (sel) => [...document.querySelectorAll(sel)]
-            .map(el => el.innerText?.trim()).filter(Boolean);
+    // Scroll to trigger lazy loading / IntersectionObserver reveals
+    await page.evaluate(() => { window.scrollTo(0, document.body.scrollHeight); });
+    await page.waitForTimeout(1000);
+    await page.evaluate(() => { window.scrollTo(0, 0); });
+    await page.waitForTimeout(500);
 
+    // Full homepage extraction
+    const data = await page.evaluate((headingSel) => {
+        const getText = (sel) => [...document.querySelectorAll(sel)]
+            .map(el => (el.innerText || el.textContent)?.trim()).filter(Boolean);
+
+        // CSS color extraction
         const colors = new Set();
         for (const sheet of document.styleSheets) {
             try {
@@ -49,27 +67,46 @@ export async function crawlSite(url) {
             matches.forEach(c => colors.add(c));
         });
 
+        // Logo — look for the site's logo image
         const logoEl = document.querySelector(
-            'img[src*="logo"], img[alt*="logo" i], img[class*="logo" i], header img, .header img, nav img'
+            'img[src*="logo"], img[alt*="logo" i], img[class*="logo" i], header img, .header img, nav img, .navbar img'
         );
         const logoUrl = logoEl ? new URL(logoEl.src, location.href).href : null;
 
+        // Font detection
         const fonts = new Set();
         document.querySelectorAll('*').forEach(el => {
             const f = getComputedStyle(el).fontFamily;
             if (f) fonts.add(f.split(',')[0].replace(/["']/g, '').trim());
         });
 
-        const navLinks = [...document.querySelectorAll('nav a, header a')]
+        // Navigation links
+        const navLinks = [...document.querySelectorAll('nav a, header a, .navbar a')]
             .map(a => ({ text: a.innerText?.trim(), href: a.href }))
             .filter(a => a.text && a.href);
 
+        // Social links
         const socialPatterns = ['facebook', 'twitter', 'instagram', 'linkedin', 'youtube', 'tiktok'];
         const socialLinks = [...document.querySelectorAll('a[href]')]
             .map(a => a.href)
             .filter(href => socialPatterns.some(p => href.includes(p)));
 
-        const headings = getText('h1, h2, h3').slice(0, 30);
+        // Headings — expanded selector, deduped
+        const rawHeadings = getText(headingSel);
+        const headings = [...new Set(rawHeadings)].slice(0, 30);
+
+        // Testimonials / quotes — capture separately so analysis knows they exist
+        const testimonials = getText('blockquote, .testimonial, [class*="testimonial" i], [class*="review" i], [class*="quote" i]')
+            .filter(t => t.length > 20).slice(0, 8);
+
+        // Images from the site (absolute URLs, skip data URIs and tiny icons)
+        const imageUrls = [...document.querySelectorAll('img[src]')]
+            .map(img => { try { return new URL(img.src, location.href).href; } catch { return null; } })
+            .filter(src => src && !src.startsWith('data:') && !src.match(/\.(ico|gif|svg)$/i))
+            .filter(src => !src.includes('logo')) // logo is captured separately
+            .filter((src, i, arr) => arr.indexOf(src) === i) // dedup
+            .slice(0, 15);
+
         const paragraphs = getText('p').slice(0, 50);
         const footerText = getText('footer, .footer').join(' ').slice(0, 500);
         const metaDesc = document.querySelector('meta[name="description"]')?.content || '';
@@ -83,23 +120,23 @@ export async function crawlSite(url) {
             .map(el => ({
                 id: el.id,
                 classes: el.className,
-                heading: el.querySelector('h1, h2, h3')?.innerText?.trim() || ''
+                heading: el.querySelector(headingSel)?.innerText?.trim() || ''
             }))
             .filter(s => s.id || s.heading).slice(0, 20);
 
         return {
-            url: location.href, title, metaDesc, headings, paragraphs,
+            url: location.href, title, metaDesc, headings, paragraphs, testimonials,
             navLinks, socialLinks, footerText, ctas, forms, sections,
             colors: [...colors].slice(0, 50),
             fonts: [...fonts].slice(0, 10),
             logoUrl,
+            imageUrls,
         };
-    });
+    }, HEADING_SEL);
 
     const screenshotBuffer = await page.screenshot({ fullPage: true });
 
     // ── Multi-page crawl ───────────────────────────────────────────────────
-    // Build crawledPages starting with the homepage
     const crawledPages = [{
         url: data.url,
         path: new URL(data.url).pathname || '/',
@@ -113,7 +150,6 @@ export async function crawlSite(url) {
     const baseOrigin = new URL(data.url).origin;
     const seenUrls = new Set([data.url]);
 
-    // Filter nav links to unique internal pages only
     const internalLinks = data.navLinks
         .filter(link => {
             try {
@@ -127,7 +163,7 @@ export async function crawlSite(url) {
         })
         .filter((link, idx, arr) => arr.findIndex(l => l.href === link.href) === idx)
         .filter(link => !seenUrls.has(link.href))
-        .slice(0, 5); // cap at 5 inner pages
+        .slice(0, 5);
 
     for (const link of internalLinks) {
         if (seenUrls.has(link.href)) continue;
@@ -137,9 +173,8 @@ export async function crawlSite(url) {
             await page.waitForTimeout(800);
             const content = await extractPageContent(page);
 
-            // If the page is thin (mostly images, minimal text), take a screenshot
-            // so the design step can use vision to understand what's there
-            const isThin = content.headings.length < 2 && content.paragraphs.length < 2;
+            // Thin = no headings AND almost no paragraphs — take a screenshot for vision
+            const isThin = content.headings.length === 0 && content.paragraphs.length < 3;
             let screenshot = null;
             if (isThin) {
                 const buf = await page.screenshot({
@@ -154,7 +189,7 @@ export async function crawlSite(url) {
                 ...content,
                 path: new URL(link.href).pathname,
                 navLabel: link.text,
-                screenshot, // null for normal pages, base64 JPEG for thin/image-only pages
+                screenshot,
             });
             console.log(`  Crawled: ${link.text} (${link.href})`);
         } catch (err) {
@@ -167,8 +202,6 @@ export async function crawlSite(url) {
     return {
         ...data,
         screenshot: screenshotBuffer.toString('base64'),
-        // crawledPages: per-page content for sitemap generation
-        // always starts with Home; inner pages follow in nav order
         crawledPages,
     };
 }

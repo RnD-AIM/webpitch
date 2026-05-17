@@ -1,8 +1,8 @@
 module.exports = {
   apps: [{
     name: 'webpitch',
-    script: 'node',
-    args: '--env-file=/opt/webpitch/.env server.js',
+    script: 'server.js',
+    node_args: '--env-file=/opt/webpitch/.env',
     cwd: '/opt/webpitch',
     restart_delay: 5000,
     max_restarts: 10,

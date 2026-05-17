@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from 'fs/promises';
+import { mkdir, writeFile, readFile, access } from 'fs/promises';
 import path from 'path';
 import { crawlSite } from './crawler/crawl.js';
 import { analyzeBusiness } from './analyze/analyze.js';
@@ -8,7 +8,8 @@ import { sendResultEmail } from './email/send.js';
 import { logJobStart, logJobComplete, logJobError } from './storage.js';
 
 const OUTPUT_DIR = '/opt/webpitch/output';
-const BASE_URL = process.env.BASE_URL || 'http://104.131.20.10:3001';
+if (!process.env.BASE_URL) throw new Error("BASE_URL env var required");
+const BASE_URL = process.env.BASE_URL;
 
 export async function runPipeline(jobId, url, recipientEmail, telegramUser = {}) {
     const jobDir = path.join(OUTPUT_DIR, jobId);
@@ -31,21 +32,37 @@ export async function runPipeline(jobId, url, recipientEmail, telegramUser = {})
     try {
         log(`Starting pipeline for ${url}`);
 
-        // Step 1: Crawl
-        log('Step 1/5: Crawling site...');
-        const crawlData = await crawlSite(url);
-        await writeFile(path.join(jobDir, 'crawl.json'), JSON.stringify(crawlData, null, 2));
-        if (crawlData.screenshot) {
-            await writeFile(path.join(jobDir, 'screenshot-original.png'), Buffer.from(crawlData.screenshot, 'base64'));
-            delete crawlData.screenshot;
+        // Step 1: Crawl (cache-first — skip if crawl.json already exists)
+        const crawlFile = path.join(jobDir, 'crawl.json');
+        let crawlData;
+        try {
+            await access(crawlFile);
+            crawlData = JSON.parse(await readFile(crawlFile, 'utf8'));
+            log('Step 1/5: Crawl cached, skipping.');
+        } catch {
+            log('Step 1/5: Crawling site...');
+            crawlData = await crawlSite(url);
+            await writeFile(crawlFile, JSON.stringify(crawlData, null, 2));
+            if (crawlData.screenshot) {
+                await writeFile(path.join(jobDir, 'screenshot-original.png'), Buffer.from(crawlData.screenshot, 'base64'));
+                delete crawlData.screenshot;
+            }
+            log(`  Crawled: ${crawlData.title} — ${crawlData.headings.length} headings, ${crawlData.paragraphs.length} paragraphs`);
         }
-        log(`  Crawled: ${crawlData.title} — ${crawlData.headings.length} headings, ${crawlData.paragraphs.length} paragraphs`);
 
-        // Step 2: Analyze
-        log('Step 2/5: Analyzing business...');
-        const analysis = await analyzeBusiness(crawlData);
-        await writeFile(path.join(jobDir, 'analysis.json'), JSON.stringify(analysis, null, 2));
-        log(`  Business: ${analysis.businessName} (${analysis.businessType})`);
+        // Step 2: Analyze (cache-first — skip if analysis.json already exists)
+        const analysisFile = path.join(jobDir, 'analysis.json');
+        let analysis;
+        try {
+            await access(analysisFile);
+            analysis = JSON.parse(await readFile(analysisFile, 'utf8'));
+            log('Step 2/5: Analysis cached, skipping.');
+        } catch {
+            log('Step 2/5: Analyzing business...');
+            analysis = await analyzeBusiness(crawlData);
+            await writeFile(analysisFile, JSON.stringify(analysis, null, 2));
+            log(`  Business: ${analysis.businessName} (${analysis.businessType})`);
+        }
 
         // Step 3: Generate designs
         log('Step 3/5: Generating 3 designs...');
