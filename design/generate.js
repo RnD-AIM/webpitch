@@ -125,46 +125,71 @@ const DEFAULT_PALETTES = [
 
 const DESIGN_STYLES = [
     {
-        name: 'Modern & Bold',
-        css_personality: `Clean white base. Large bold sans-serif headlines (clamp 3-5rem).
-Gradient hero with diagonal CSS clip-path (polygon). Sticky nav with blur backdrop-filter.
-Cards with subtle box-shadow on hover lift. Dark footer. Accent color on CTAs.
-Stats displayed as oversized numbers (5-6rem) in a dark band.`,
-        layout_patterns: `HOME: Full-viewport hero, 2-col grid (headline+CTAs left, 3 floating stat pills right), hero bg = gradient.
-Below hero: narrow trust strip (5 icon+label items in a row).
-Features: 3-col card grid with emoji icon, bold title, 20-word body.
-Stats band: dark background, 4 huge numbers in a row.
-Testimonials: 3 cards with star rating (★★★★★), italic quote, avatar initial circle.
-CTA strip: gradient bg, centered headline + 2 buttons.
-FOOTER: dark, 4-col grid (logo+tagline | links | links | social+contact).`,
+        name: 'Split Corporate',
+        css_personality: `White base. Bold sans-serif headlines. No cards for features — use horizontal alternating rows.
+Sticky nav: white bg, box-shadow 0 1px 0 #e2e8f0, height 72px. Buttons: sharp (border-radius 4px), solid fill.
+Hero: 55/45 split — left column has text, right column is the hero.jpg (object-fit:cover, full height).
+If no hero image: full-width gradient (primary → dark), text centered.
+Stats: giant numbers (6rem) on a dark band with thin accent-color top border.
+Testimonials: left-border 4px accent, italic quote, no cards, 2-col layout.
+Section labels: eyebrow uppercase tracking-widest 11px, accent color, margin-bottom 8px.
+No emojis. No decorative icons. Numbers and typography carry the visual weight.`,
+        layout_patterns: `HOME:
+- Hero: <div style="display:grid;grid-template-columns:55% 45%;min-height:100vh;"> Left: dark bg, centered content (eyebrow + h1 clamp(3rem,5vw,4.5rem) + subhead + 2 buttons + 3 inline stats). Right: <img src="./hero.jpg" style="width:100%;height:100%;object-fit:cover;">. If no hero.jpg: full-width gradient hero centered.
+- Trust strip: white bg, max-width container, 5 text labels in a row separated by thin vertical rules (1px solid #e2e8f0), font-size 0.85rem uppercase letter-spacing.
+- Features: 3 alternating rows. Each row: left text (eyebrow + h3 + 2-sentence body + text link) on white; right: solid accent-color block (border-radius 0) with 1 key number or short quote centered in white. Odd rows swap sides.
+- Stats: dark bg band, 4 numbers (6rem font, accent color), label below in small caps.
+- Testimonials: 2-col, each a blockquote — 4px left border accent, italic 1.2rem quote, author name bold, role small gray.
+- CTA: primary-color bg, centered h2 + subhead + 1 button white outline.
+- Footer: dark, 4-col grid.
+
+INNER PAGES:
+- Page hero: left-aligned, 40vh, dark bg, eyebrow + h1 + short body.
+- Content: alternating left-label / right-content rows with thin bottom border (like a definition list at scale).`,
     },
     {
-        name: 'Dark & Dramatic',
-        css_personality: `Near-black (#0d1117) base, crisp white text, electric accent glows.
-Gradient text clips on hero headlines (background-clip: text).
-Frosted glass cards (rgba background + backdrop-filter blur).
-Neon-border buttons with glow on hover. Sections alternate dark/slightly-lighter.`,
-        layout_patterns: `HOME: Full-dark viewport hero. Centered layout. Large gradient-clip headline (text as gradient).
-Subtitle. 2 glass-morphism CTA buttons. Radial glow behind the headline.
-Feature chips: horizontal scrollable row of pill-shape icon+label items.
-Cards section: 3 glass-dark cards with accent top border, emoji icon, title, body.
-Light breakout section (white bg): testimonials or social proof for contrast.
-Dark stats band: 4 numbers glowing in accent color.
-FOOTER: slightly lighter dark, centered layout.`,
+        name: 'Dark Statement',
+        css_personality: `Near-black base (var(--dark)). Crisp white text. Typography is the hero.
+Nav: fully transparent on scroll-top, dark solid after scroll. Logo white. Links white.
+Hero headline: clamp(4rem,8vw,7rem). Key words wrapped in <span style="color:var(--accent)"> for color emphasis.
+Sections alternate: dark → slightly lighter dark (background: rgba(255,255,255,0.04)) for rhythm.
+Buttons: outline style (border 2px solid accent, transparent bg, accent text) on dark; filled on light sections.
+No cards, no emojis. Each feature is a full-width dark row with a large number and short text block.
+Testimonials: centered single large italic quote, decorative open-quote character (") 6rem accent color above.
+Light breakout section: pure white bg, dark text — used for stats or CTA to create strong contrast break.`,
+        layout_patterns: `HOME:
+- Hero: full-viewport dark bg. Centered. Large eyebrow (uppercase 12px white/50%). h1 with accent-colored key word. Subhead 1.2rem white/70%. 2 buttons (outline + ghost). No hero image in viewport — hero.jpg used as subtle 10% opacity background texture if available.
+- Features: NO grid. 3-4 stacked full-width rows. Each: left column has a large counter (01 / 02 / 03) in 5rem accent color; right column has h3 + body paragraph. Thin horizontal rule between rows.
+- Light break section: white bg, 4 stats in a row, dark text on white.
+- Testimonials: centered on dark, decorative " character (font-size 8rem, accent, opacity 0.3, position absolute), below it: italic quote 1.4rem white, then name + role in small text.
+- CTA: gradient bg (primary to secondary), centered h2 + body + 1 large button.
+- Footer: slightly lighter dark, centered — logo, links in a single row, copyright.
+
+INNER PAGES:
+- Dark page hero: full-width dark, centered, h1 + eyebrow.
+- Content sections: dark alternating rows, clean typography.`,
     },
     {
-        name: 'Editorial & Warm',
-        css_personality: `Off-white (#fafaf9) background. Serif headings (Georgia/serif) + sans body.
-Generous whitespace (section padding 120px). Thin hairline borders (1px solid #e5e7eb).
-Warm accent color pops only on key elements. Asymmetric editorial grid layouts.
-Photo-editorial feel: large image placeholder boxes (aspect-ratio: 16/9, gradient fill).`,
-        layout_patterns: `HOME: Asymmetric hero — oversized serif headline left (80% width), thin vertical rule,
-small eyebrow label above. Background: large off-white, one color block behind headline.
-Wide image placeholder below fold (full-width, 400px tall, gradient).
-Features: 2-col alternating layout (text left, visual block right; then swap).
-Process steps: numbered 1-2-3-4 in thin left-border list, step title + 2-sentence description.
-Pull quote section: large italic quote between two thin horizontal rules.
-Minimal footer: centered, just logo + links + copyright, lots of whitespace.`,
+        name: 'Editorial Minimal',
+        css_personality: `Off-white (#fafaf9) background. Georgia/serif for headlines, system-ui for body.
+Maximum whitespace. Section padding 120px 0. NO cards anywhere.
+Nav: minimal — just logo and 4 text links, no button, no background, only a thin 1px bottom border.
+Hero: pure typography. No image. Oversized serif headline (clamp 4.5rem,9vw,8rem), full width.
+Features rendered as a numbered table: thin horizontal rules, large left counter, text right.
+Testimonials: full-width centered, large quotation marks as decoration, thin rules above/below.
+All body text max-width 680px, centered or left-aligned, comfortable line-height 1.8.
+Accent color used sparingly: only on links, counters, and one highlight element per section.
+No emojis. No icons. Decoration comes from typography scale and white space.`,
+        layout_patterns: `HOME:
+- Hero: off-white full-width. Eyebrow (uppercase 11px letter-spacing 0.15em accent). h1 serif, spanning 90% width, clamp(5rem,9vw,8rem), dark color. Below: 2-col (intro paragraph left, 3 key stats right — each stat: large number serif 3rem + label in small caps). Hero.jpg if present: placed below fold as a full-width image (aspect-ratio:16/9, object-fit:cover), not as hero bg.
+- Features/services: numbered rows — "01", "02", "03" in serif 4rem accent left; title h3 + 2-sentence body right; thin 1px #e5e7eb rule separating each. No cards, no grids.
+- Testimonials: centered, max-width 680px. Open " in serif 6rem accent opacity 0.25. Italic quote 1.3rem. Thin rule. Author name + role small caps.
+- CTA: off-white with a thin full-width border-top. Centered. h2 serif + short body + 1 button.
+- Footer: centered, generous padding. Logo + horizontal link list + copyright. Nothing else.
+
+INNER PAGES:
+- Page hero: typography only, off-white, eyebrow + h1 serif, left-aligned, max-width.
+- Content: editorial column (max-width 720px, centered), large readable type.`,
     },
 ];
 
@@ -235,17 +260,17 @@ Return ONLY valid JSON:
 const SECTION_LIBRARY = `
 hero              → { eyebrow, headline, subheadline, primary_cta, secondary_cta, stat1{value,label}, stat2{value,label}, stat3{value,label} }
 page_hero         → { eyebrow, headline, body }
-trust_strip       → { label, items:["emoji + label",...5] }
-features_grid     → { eyebrow, headline, items:[{icon,title,body:"~20 words"},...3] }
+trust_strip       → { label, items:["short text label",...5] }
+features_grid     → { eyebrow, headline, items:[{title,body:"~20 words"},...3] }
 stats_band        → { items:[{value,suffix,label},...4] }
-testimonials_grid → { eyebrow, headline, items:[{quote:"~30 words",author,role,rating:5},...3] }
+testimonials_grid → { eyebrow, headline, items:[{quote:"~30 words",author,role},...3] }
 cta_strip         → { headline, body:"~20 words", primary_cta, secondary_cta }
-services_cards    → { eyebrow, headline, items:[{icon,title,body:"~40 words",cta},...3-6] }
+services_cards    → { eyebrow, headline, items:[{title,body:"~40 words",cta},...3-6] }
 menu_grid         → { eyebrow, headline, categories:[{name,items:[{name,description:"~15 words",price},...3-5]},...3-4] }
 portfolio_grid    → { eyebrow, headline, items:[{title,category,description:"~20 words"},...6] }
 process_steps     → { eyebrow, headline, steps:[{number:"01",title,body:"~25 words"},...3-4] }
 team_grid         → { eyebrow, headline, members:[{name,role,bio:"~20 words",initial},...3] }
-story_split       → { eyebrow, headline, body_p1:"~60 words", body_p2:"~40 words", founded_label, founded_value, values:[{icon,title,body:"~10 words"},...4] }
+story_split       → { eyebrow, headline, body_p1:"~60 words", body_p2:"~40 words", founded_label, founded_value, values:[{title,body:"~10 words"},...4] }
 faq_accordion     → { eyebrow, headline, items:[{q,a:"~30 words"},...4] }
 gallery_grid      → { eyebrow, headline, items:[{caption:"~10 words",category},...6] }
 pricing_cards     → { eyebrow, headline, items:[{name,price,period,features:["...",...4],cta,featured:bool},...3] }
@@ -400,7 +425,7 @@ Rules:
 - Testimonials: specific and believable, mention concrete outcomes, use real-sounding names
 - CTAs: action-oriented and specific ("Book a Free Consultation", "View Our Menu", "Get a Quote")
 - Stats: realistic numbers that fit the business type (do not invent absurd figures)
-- Emojis: pick the single most relevant emoji per item
+- NO emojis anywhere. trust_strip items are short text labels (3–5 words). features/services have no icon field.
 - Do NOT change JSON keys, arrays, structure, or non-abstract values (like "map_placeholder": true)
 - Every field that contains an abstract description must be replaced with actual text
 
@@ -451,7 +476,7 @@ Include these sections in order:
 1. :root { all CSS variables — colors, font scale (sm/base/lg/xl/2xl/3xl/4xl), spacing scale, radius, shadows }
 2. Reset: *, html, body (font-family: system-ui sans-serif or serif based on style, line-height, color)
 3. Typography: h1 (clamp 2.5rem–5rem), h2 (clamp 1.8rem–3rem), h3 (1.4rem), h4, p, strong, a
-4. Layout utilities: .container (max-width 1200px, auto margin), .section (padding 96px 0), .section-sm (64px 0), .grid-2, .grid-3, .grid-4, .flex, .flex-center, .flex-between, .flex-col, .gap-sm/md/lg
+4. Layout utilities: .container (max-width 1200px, auto margin, padding 0 24px), .section (padding 96px 0), .section-sm (64px 0), .flex, .flex-center, .flex-between, .flex-col, .gap-sm/md/lg. Responsive grids using auto-fit: .grid-2 { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,480px),1fr)); gap:var(--gap-md); } .grid-3 { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,300px),1fr)); gap:var(--gap-md); } .grid-4 { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,220px),1fr)); gap:var(--gap-md); }
 5. Buttons: .btn (base), .btn-primary (filled accent/primary), .btn-secondary (outline), .btn-ghost (text only), .btn-lg, .btn-sm
 6. Card: .card (background surface, radius, shadow, padding 32px, hover lift transition)
 7. Badge/eyebrow: .eyebrow (small caps, letter-spacing, accent color, display block, margin-bottom 8px)
@@ -604,16 +629,17 @@ ${schemaBlock}
 ${uxIntel?.ux ? `UX INTELLIGENCE:\n${uxIntel.ux}\n` : ''}
 RULES:
 1. Placeholders only for text. Nav links and hrefs use the exact HTML given above (not placeholders).
-2. Stars: ★★★★★ directly (not a placeholder).
-3. Avatar circles: inline div, 48×48px, border-radius 50%, bg primary, white text — use the initial placeholder.
-4. Stat numbers: font-size clamp(3rem,6vw,5rem), bold, color accent.
-5. Hero (home only): use #hero style from above. Other pages: use class="page-hero".
-6. FAQ: <details><summary> elements.
-7. Image placeholders: use existing site images above if available; otherwise gradient div.
-8. Footer: 4-col dark footer, copyright © ${new Date().getFullYear()} ${analysis.businessName}.
-9. IntersectionObserver JS at bottom: adds class "visible" to .animate elements.
-10. Do NOT add a mobile nav script — it is injected automatically after generation.
-11. Return ONLY complete HTML from <!DOCTYPE html> to </html>. No fences, no explanation.`,
+2. NO emojis anywhere in the HTML. No decorative icons. Use numbers, typography, and CSS for visual interest.
+3. Stars: ★★★★★ directly (not a placeholder) — only in testimonials.
+4. Avatar circles: inline div, 48×48px, border-radius 50%, bg primary, white text — use the initial placeholder.
+5. Stat numbers: font-size clamp(3rem,6vw,5rem), bold, color accent.
+6. Hero (home only): use #hero style from above. Other pages: use class="page-hero".
+7. FAQ: <details><summary> elements.
+8. Images: use existing site images if provided above; otherwise a gradient div (aspect-ratio:16/9).
+9. Footer: dark footer, copyright © ${new Date().getFullYear()} ${analysis.businessName}.
+10. IntersectionObserver JS at bottom: adds class "visible" to .animate elements on scroll.
+11. Do NOT add mobile nav script — injected automatically. Do NOT add hamburger JS.
+12. Return ONLY complete HTML from <!DOCTYPE html> to </html>. No fences, no explanation.`,
         }],
     });
     const template = resp.content[0].text.trim().replace(/^```html\n?/, '').replace(/\n?```$/, '');
