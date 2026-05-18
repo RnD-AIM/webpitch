@@ -1,135 +1,125 @@
 # HANDOFF.md — Webpitch session handoff
 
-Last updated: 2026-05-15
+Last updated: 2026-05-17
 
 ---
 
 ## Current state
 
-The pipeline is deployed and running on `104.131.20.10:3001`. All 6 steps execute end-to-end. Email delivery is confirmed working.
-
-The architecture was overhauled significantly during this session. If you're reading this to understand what changed and why, this document has the full context.
+The pipeline is deployed and running on `104.131.20.10:3001` (public: `https://era.ndi.mx`). All steps execute end-to-end. Email delivery is working. Designs have scroll animations, gallery, and microinteractions. The Telegram bot has job management commands.
 
 ---
 
-## What was built this session (in order)
+## What was built — session 2026-05-16
 
-### 1. Email delivery (fixed)
-The pipeline was completing but emails were either not arriving or arriving empty.
+### 1. Template + injection architecture (design/generate.js)
+Previously the LLM wrote both layout AND copy in each HTML call (~8000 tokens/page). Now:
+- `generatePageSections()` produces abstract section schemas (what kind of content, not the text)
+- `enrichContent()` (Claude Haiku) fills in real copy — one call per page, 4000 tokens
+- `generatePageHTML()` receives section types + placeholder schema, returns HTML with `{{hero.headline}}` etc.
+- `renderTemplate()` in Node.js resolves all placeholders from `content.json`
+- max_tokens for HTML calls dropped from 8000 → 6000 (templates are shorter than content-embedded HTML)
 
-Three bugs fixed:
-- n8n webhook `responseMode: "immediately"` is invalid — changed to `"onReceived"`
-- Gmail OAuth credential was broken — replaced with SMTP emailSend node using "Gmail SMTP" credential (`VKPAqik6o9PxquYa`)
-- emailSend node params were wrong (`message:` → `html:`, `options.emailType` → `emailFormat: "html"`)
+### 2. Proposal split — fixed blank pages (proposal/generate.js)
+Single 6000-token call was running out before reaching `<body>`. Split into:
+- `generateProposalCSS()` — 4000 tokens, CSS only
+- `generateProposalBody()` — 7000 tokens, HTML body only (no `<style>` tag)
+- Assembly in `generateProposal()` combines both into standalone HTML
 
-### 2. Design quality overhaul (design/generate.js rewrite)
-The original approach generated a single HTML file per design. Claude was running out of tokens before reaching the `<body>` tag — designs came back as CSS-only files with 0 div elements.
+### 3. Responsive CSS as separate file
+`@media` blocks were item #13 of 13 in a 6000-token CSS call — always getting cut off. Fixed:
+- `generateDesignSystem()` — base CSS only, no @media
+- `generateResponsiveCSS()` — separate call, @media blocks only, output to `responsive.css`
+- Guaranteed hamburger CSS appended deterministically after LLM output
+- All HTML pages link both `design.css` and `responsive.css`
 
-New architecture:
-- **Sitemap-first**: page structure decided before any HTML is written
-- **Multi-page**: each design is 3–5 separate HTML files + shared CSS
-- **Content-first**: GPT-4o-mini writes all copy once, Claude handles layout only
-- **Chunked sitemap**: sitemap generation split into two phases to avoid token overflow
-- **Crawler-grounded**: sitemap derived from pages the crawler actually found, not invented
+### 4. suggestPalettes fixed — site colors now used
+The function was calling `new OpenAI(...)` but `OpenAI` was never imported → silent ReferenceError → always fell back to the same 3 hardcoded palettes every run. Fixed: rewrote using `axios.post` directly to Gemini Flash (OpenAI-compat endpoint). Now uses `crawlData.colors` extracted from the site's CSS to derive palettes that evolve the existing brand.
 
-### 3. Crawler upgraded (crawler/crawl.js)
-Original: crawled only the homepage.
+### 5. Logo + mobile nav (deterministic, not LLM)
+- `crawlData.logoUrl` captured by crawler; `generatePageHTML` now uses it in a deterministic navBlock built in Node.js (`<img src="${logoUrl}">` or text fallback)
+- Mobile hamburger JS injected from Node.js before `</body>` regardless of LLM output
+- Hamburger CSS guaranteed by appending after `generateResponsiveCSS()` LLM output
 
-New: follows internal nav links (up to 5 pages, 15s timeout each). Per inner page: headings, paragraphs, CTAs. Image-heavy pages (thin text) get a viewport screenshot for Claude vision.
+### 6. Crawler improvements (crawler/crawl.js)
+- Expanded heading selector: catches Bootstrap `.h2`, `.section-title`, etc.
+- Scroll-to-reveal before extraction (triggers IntersectionObserver-hidden content)
+- Added: testimonials capture, imageUrls capture (up to 15), thin-page threshold adjusted
+- `textContent` fallback when `innerText` is empty
 
-Returns `crawledPages[]` — used by sitemap generation to understand existing site structure.
+### 7. Design quality overhaul — 3 structurally distinct layouts
+Previous DESIGN_STYLES had similar layouts differing only in color. Replaced with:
+1. **Split Corporate** — 55/45 split hero, alternating feature rows, blockquote testimonials
+2. **Dark Statement** — near-black, numbered stacked features (01/02/03), decorative quote mark
+3. **Editorial Minimal** — off-white serif, pure typography hero, numbered table rows
 
-### 4. Design intelligence integration (ui-ux-pro-max)
-Skill from https://github.com/nextlevelbuilder/ui-ux-pro-max-skill installed on droplet at `/opt/webpitch/ui-ux-pro-max/`.
-
-4 parallel Python calls per job query the BM25 search engine for:
-- Industry-specific color palette
-- Typography pairings matching business tone
-- UI style guidance with CSS keywords
-- UX guidelines and anti-patterns
-
-Results injected into CSS generation and HTML generation prompts.
-
-### 5. gpt-image-1 for hero images
-The original code used DALL-E 3 (key didn't have access). Switched to `gpt-image-1` as primary (returns `b64_json`), Gemini Imagen 3 as fallback, CSS gradient as last resort.
-
-### 6. Supabase job logging
-All jobs logged to `webpitch_jobs` table in Supabase project `lsmiknqpuruvgsnttihq`. Fields: job_id, url, business identifiers, telegram user, proposal URL, status, error.
-
----
-
-## Architecture decisions made (and why)
-
-### Why GPT-4o-mini for content enrichment
-Claude Sonnet was being asked to both write copy AND design layout in each HTML call. Splitting these concerns means: one cheap GPT-4o-mini call writes all copy across all pages; Claude HTML calls are layout-only and shorter. Better quality, lower cost.
-
-### Why two-phase sitemap (decidePagesStructure + generatePageSections)
-A single call generating the full sitemap for a 4-5 page site was hitting 4096 token output limits and getting cut off mid-JSON. Splitting into phase A (page list, ~300 tokens) and phase B (sections per page, ~1000 tokens each) makes it impossible to overflow regardless of site size. **Never increase max_tokens to fix truncation — split the call instead.**
-
-### Why crawler-driven sitemap
-Previously Claude invented the page structure. Now the crawler tells us what pages actually exist, and Claude maps them to the new design. A pizzeria gets Home + Menu + About + Contact, not a generic Services page.
-
-### Why ui-ux-pro-max at runtime
-The Python search engine has 161 industry-specific palettes, 67 UI styles, 57 typography pairings — queried with the actual business type. This grounds design decisions in industry conventions rather than Claude's generic sense of "professional." The Python calls are cheap (~50ms each, 4 in parallel).
-
-### Why email goes through n8n instead of directly
-DigitalOcean blocks outbound SMTP (ports 25/465/587) on their droplets. n8n cloud acts as the email relay. The server POSTs a webhook payload to n8n, which sends the email via Gmail SMTP.
+Removed icon/emoji fields from SECTION_LIBRARY. Added "NO emojis" rule to enrichment and HTML generation prompts. trust_strip items are now plain text labels.
 
 ---
 
-## Files modified this session (all on droplet)
+## What was built — session 2026-05-17
 
-| File | What changed |
+### 8. GSAP ScrollTrigger animations (design/generate.js)
+New `buildAnimationScript(page, hasHeroImage)` — deterministic JS block generated by Node.js based on section types present in the page. Injected before `</body>` alongside mobile nav script. GSAP + ScrollTrigger CDN injected into `<head>` via Node.js.
+
+Animations per section type: hero parallax, card stagger, story split reveal, testimonial stagger, process steps cascade, stats counter (`[data-count]`), pricing pop-in, FAQ cascade, universal section fade-in.
+
+The LLM is required to add `id="section-{type}"` on every `<section>` for targeting.
+
+### 9. Image gallery from existing site (design/generate.js)
+New `buildGallerySection(imageUrls, analysis)` — injected before `<footer>` on `index.html` when `crawlData.imageUrls.length >= 4`. CSS Grid auto-fill with native `<dialog>` lightbox, prev/next navigation, keyboard support. No external library.
+
+### 10. Microinteraction CSS (design/generate.js)
+Appended deterministically after `generateDesignSystem()` LLM output: card hover lift (+5px, shadow), button hover lift+glow, link opacity transition, input focus ring, FAQ summary color transition.
+
+### 11. Duplicate URL detection + job management (server.js + storage.js)
+- `POST /api/analyze` — checks Supabase for completed job with same URL before starting; returns existing links immediately with formatted message
+- `GET /api/jobs` — lists recent jobs with shortId and all output links
+- `DELETE /api/jobs/:jobId` — removes output directory + Supabase record; accepts full UUID or 8-char short ID
+
+New storage.js functions: `findCompletedJobByUrl`, `findRunningJobByUrl`, `listRecentJobs`, `deleteJobRecord`
+
+### 12. Telegram bot commands (n8n workflow dcB3sel7sjKGRM6S)
+Added `/status` (lists last 8 jobs with links) and `/del [shortId]` (deletes job for reprocessing). All replies now use the `message` field from server responses — no formatting logic in n8n.
+
+---
+
+## Files modified (all on droplet + committed to GitHub RnD-AIM/webpitch)
+
+| File | Changes |
 |---|---|
-| `design/generate.js` | Complete rewrite — sitemap-first, multi-page, content enrichment, ux-pro-max integration, gpt-image-1, vision support |
-| `crawler/crawl.js` | Added multi-page crawling, thin-page screenshot capture |
-| `proposal/generate.js` | Links updated to `design-N/index.html`; added Cloudflare retry logic; uses `palette.concept` |
-| `email/send.js` | Links updated from `d.filename` to `${d.dir}/index.html` |
-| `server.js` | Accepts `telegramUser` in webhook body |
-| `pipeline.js` | Accepts and passes `telegramUser`; calls Supabase logging |
-| `storage.js` | New file — Supabase logging (logJobStart, logJobComplete, logJobError) |
+| `design/generate.js` | Template+injection, GSAP animations, gallery section, microinteraction CSS, palette fix (axios), logo in nav, responsive CSS split, 3 new design styles, no-emoji enforcement |
+| `crawler/crawl.js` | Expanded heading selector, scroll-to-reveal, testimonials, imageUrls, thin-page threshold |
+| `proposal/generate.js` | Split into CSS + body calls; max_tokens 7000 for body |
+| `server.js` | Duplicate detection, GET /api/jobs, DELETE /api/jobs/:jobId, jobLinks() helper |
+| `storage.js` | findCompletedJobByUrl, findRunningJobByUrl, listRecentJobs, deleteJobRecord |
+| `n8n workflow dcB3sel7sjKGRM6S` | /status command, /del command, existing:true response handling |
 
 ---
 
 ## Open items (prioritized)
 
-### High — affects output quality
-1. **`enrichContent` uses only homepage content** — the function passes `crawlData.paragraphs` (homepage) to GPT-4o-mini but crawled inner pages have per-page paragraphs in `crawlData.crawledPages[].paragraphs`. Should pass per-page content to the enricher for better copy on inner pages.
+### High — output quality
+1. **`enrichContent` uses homepage context only** — `crawlData.paragraphs` is homepage text. Inner pages have per-page paragraphs in `crawlData.crawledPages[].paragraphs`. Passing page-specific content would improve copy on inner pages.
 
-2. **Cloudflare retry not in `proposal/generate.js`** — add the same `callClaude()` wrapper that's in `design/generate.js` and `analyze/analyze.js`.
+### Medium — operational
+2. **No cleanup of old output directories** — `/opt/webpitch/output/` grows forever. Add a cron to delete jobs (and Supabase records) older than N days.
 
-### Medium — operational improvements
-3. **No job status endpoint** — the pipeline runs async and there's no way to poll for completion. Add `GET /api/status/:jobId` that reads from Supabase.
+3. **`resend.mjs` and `regen.mjs` have hardcoded job IDs** — one-off scripts. Generalize to accept `--jobId` arg or delete.
 
-4. **No concurrency control** — if two URLs arrive simultaneously, both pipelines run in parallel, potentially exhausting API rate limits. Add a simple queue (p-queue or similar).
-
-5. **`resend.mjs` and `regen.mjs` have hardcoded job IDs** — these were one-off scripts. Either generalize them to accept a job ID argument or delete them.
-
-### Low — nice to have
-6. **Hero image URL in HTML is relative** — `hero.jpg` is referenced relatively in the HTML. If the output directory structure ever changes, the link breaks. Embed as base64 or use absolute URL.
-
-7. **No cleanup of old output directories** — `/opt/webpitch/output/` grows forever. Add a cron to delete jobs older than N days.
-
-8. **Proposal links to design pages** — proposal.html has hardcoded links. If regenerating only the proposal (not the designs), links still need to resolve correctly.
-
----
-
-## Environment variables (reference)
-
-All set in `/opt/webpitch/.env` on the droplet. See `.env.example` in the repo for full list with descriptions.
-
-Key values:
-- `WEBHOOK_SECRET=j2bd3xchy6hkckkckhhqtmxmg`
-- `DEFAULT_EMAIL=er@ndi.mx`
-- `BASE_URL=http://104.131.20.10:3001`
-- `N8N_EMAIL_WEBHOOK=https://aimkt.app.n8n.cloud/webhook/webpitch-job-complete`
+### Phase 2 gate (5 paying customers required first)
+4. **BullMQ job queue** — current `_jobRunning` boolean has a race condition. Phase 2 needs real queue with concurrency control, retries, and worker isolation.
+5. **Signed output URLs with expiry** — for paid access control.
+6. **Stripe integration** — automated payment + URL delivery.
+7. **Cost reduction** — switch `generatePageHTML` from Sonnet to Haiku; reduce to 3 pages per design and 2 designs.
 
 ---
 
 ## How to continue
 
-1. Confirm server is up: `curl http://104.131.20.10:3001/health`
+1. Confirm server: `curl http://104.131.20.10:3001/health`
 2. Read `AGENTS.md` for full technical context
-3. Test a job: send a URL via Telegram or use the curl command in AGENTS.md
-4. Watch logs: `ssh root@104.131.20.10 "pm2 logs webpitch --lines 100"`
-5. After any code change: `scp <file> root@104.131.20.10:/opt/webpitch/<path> && ssh root@104.131.20.10 "pm2 restart webpitch --update-env"`
+3. Test via Telegram: send a URL, `/status`, `/del [id]`
+4. Test via curl: see AGENTS.md → "How to test without Telegram"
+5. Watch logs: `ssh root@104.131.20.10 "pm2 logs webpitch --lines 100"`
+6. After code changes: `scp <file> root@104.131.20.10:/opt/webpitch/<path> && ssh root@104.131.20.10 "pm2 restart webpitch --update-env"`
