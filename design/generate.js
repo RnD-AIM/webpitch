@@ -91,6 +91,211 @@ function renderTemplate(html, sections) {
     return rendered;
 }
 
+// ── GSAP ANIMATION SCRIPT (deterministic, based on section types) ───────────
+
+function buildAnimationScript(page, hasHeroImage) {
+    const sectionTypes = new Set(page.sections.map(s => s.type));
+    const parts = [];
+
+    // Universal: fade-in all sections on scroll
+    parts.push(`
+    gsap.utils.toArray('section[id^="section-"]').forEach(function(el) {
+        gsap.from(el, {
+            opacity: 0, y: 48, duration: 0.85, ease: 'power2.out',
+            scrollTrigger: { trigger: el, start: 'top 88%', once: true }
+        });
+    });`);
+
+    // Hero parallax — only when hero.jpg is present
+    if (hasHeroImage) {
+        parts.push(`
+    var heroEl = document.getElementById('hero');
+    if (heroEl) {
+        gsap.to(heroEl, {
+            backgroundPositionY: '35%', ease: 'none',
+            scrollTrigger: { trigger: heroEl, start: 'top top', end: 'bottom top', scrub: 1.5 }
+        });
+    }`);
+    }
+
+    // Stagger card entrance for grid sections
+    if (sectionTypes.has('features_grid') || sectionTypes.has('services_cards') || sectionTypes.has('portfolio_grid') || sectionTypes.has('team_grid')) {
+        parts.push(`
+    ['section-features_grid','section-services_cards','section-portfolio_grid','section-team_grid'].forEach(function(id) {
+        var sec = document.getElementById(id);
+        if (!sec) return;
+        var items = sec.querySelectorAll('.grid-2 > *, .grid-3 > *, .grid-4 > *, .card');
+        if (!items.length) return;
+        gsap.from(items, {
+            opacity: 0, y: 56, scale: 0.96, duration: 0.65, stagger: 0.13, ease: 'power2.out',
+            scrollTrigger: { trigger: sec, start: 'top 82%', once: true }
+        });
+    });`);
+    }
+
+    // Story split — text from left, image from right
+    if (sectionTypes.has('story_split')) {
+        parts.push(`
+    var storySec = document.getElementById('section-story_split');
+    if (storySec) {
+        var cols = storySec.querySelectorAll('.grid-2 > *');
+        if (cols.length >= 2) {
+            gsap.from(cols[0], { opacity: 0, x: -70, duration: 1, ease: 'power2.out', scrollTrigger: { trigger: storySec, start: 'top 78%', once: true } });
+            gsap.from(cols[1], { opacity: 0, x: 70, duration: 1, delay: 0.15, ease: 'power2.out', scrollTrigger: { trigger: storySec, start: 'top 78%', once: true } });
+        }
+    }`);
+    }
+
+    // Testimonials stagger (scale + fade)
+    if (sectionTypes.has('testimonials_grid')) {
+        parts.push(`
+    var testSec = document.getElementById('section-testimonials_grid');
+    if (testSec) {
+        var items = testSec.querySelectorAll('blockquote, .card, .grid-3 > *');
+        gsap.from(items, {
+            opacity: 0, y: 36, scale: 0.96, duration: 0.7, stagger: 0.18, ease: 'power2.out',
+            scrollTrigger: { trigger: testSec, start: 'top 82%', once: true }
+        });
+    }`);
+    }
+
+    // Process steps sequential left-to-right reveal
+    if (sectionTypes.has('process_steps')) {
+        parts.push(`
+    var procSec = document.getElementById('section-process_steps');
+    if (procSec) {
+        var steps = procSec.querySelectorAll('.grid-3 > *, .grid-4 > *, [class*="step"]');
+        gsap.from(steps, {
+            opacity: 0, x: -40, duration: 0.65, stagger: 0.22, ease: 'power1.out',
+            scrollTrigger: { trigger: procSec, start: 'top 82%', once: true }
+        });
+    }`);
+    }
+
+    // Counter animation for stats — targets elements with [data-count]
+    if (sectionTypes.has('stats_band') || sectionTypes.has('hero')) {
+        parts.push(`
+    document.querySelectorAll('[data-count]').forEach(function(el) {
+        var target = parseFloat(el.getAttribute('data-count').replace(/[^0-9.]/g, ''));
+        if (isNaN(target)) return;
+        var suffix = el.getAttribute('data-count').replace(/[0-9.]/g, '');
+        var obj = { val: 0 };
+        gsap.to(obj, {
+            val: target, duration: 2.2, ease: 'power1.out',
+            onUpdate: function() { el.textContent = Math.round(obj.val).toLocaleString() + suffix; },
+            scrollTrigger: { trigger: el, start: 'top 88%', once: true }
+        });
+    });`);
+    }
+
+    // Pricing cards pop-in
+    if (sectionTypes.has('pricing_cards')) {
+        parts.push(`
+    var priceSec = document.getElementById('section-pricing_cards');
+    if (priceSec) {
+        var cards = priceSec.querySelectorAll('.card, .grid-3 > *');
+        gsap.from(cards, {
+            opacity: 0, y: 48, scale: 0.93, duration: 0.7, stagger: 0.15, ease: 'back.out(1.4)',
+            scrollTrigger: { trigger: priceSec, start: 'top 82%', once: true }
+        });
+    }`);
+    }
+
+    // FAQ accordion items cascade
+    if (sectionTypes.has('faq_accordion')) {
+        parts.push(`
+    var faqSec = document.getElementById('section-faq_accordion');
+    if (faqSec) {
+        var items = faqSec.querySelectorAll('details');
+        gsap.from(items, {
+            opacity: 0, y: 20, duration: 0.5, stagger: 0.1, ease: 'power1.out',
+            scrollTrigger: { trigger: faqSec, start: 'top 85%', once: true }
+        });
+    }`);
+    }
+
+    return `<script>
+(function() {
+    if (typeof gsap === 'undefined' || typeof ScrollTrigger === 'undefined') return;
+    gsap.registerPlugin(ScrollTrigger);
+    window.addEventListener('load', function() {
+${parts.join('\n')}
+    });
+})();
+</script>`;
+}
+
+// ── GALLERY SECTION (existing site images + dialog lightbox) ────────────────
+
+function buildGallerySection(imageUrls, analysis) {
+    if (!imageUrls || imageUrls.length < 4) return '';
+    const imgs = imageUrls.slice(0, 12);
+    const thumbs = imgs.map((url, i) =>
+        `        <button class="gallery-thumb" onclick="openGallery(${i})" aria-label="Ver imagen ${i + 1}">
+            <img src="${url}" alt="${analysis.businessName}" loading="lazy">
+        </button>`
+    ).join('\n');
+    const dialogImgs = imgs.map((url, i) =>
+        `    <img src="${url}" class="gallery-dialog-img${i === 0 ? ' active' : ''}" data-idx="${i}" alt="Imagen ${i + 1}">`
+    ).join('\n');
+
+    return `
+<section class="section gallery-section" id="section-gallery">
+    <div class="container">
+        <p class="eyebrow">Nuestros proyectos</p>
+        <h2>Galería</h2>
+        <div class="gallery-grid">
+${thumbs}
+        </div>
+    </div>
+</section>
+
+<dialog id="galleryDialog" class="gallery-dialog">
+    <button class="gallery-close" onclick="closeGallery()" aria-label="Cerrar">&#x2715;</button>
+    <button class="gallery-prev" onclick="prevImg()" aria-label="Anterior">&#8249;</button>
+${dialogImgs}
+    <button class="gallery-next" onclick="nextImg()" aria-label="Siguiente">&#8250;</button>
+</dialog>
+
+<style>
+.gallery-section { overflow: hidden; }
+.gallery-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 220px), 1fr)); gap: 12px; margin-top: 40px; }
+.gallery-thumb { border: none; padding: 0; cursor: pointer; border-radius: 10px; overflow: hidden; aspect-ratio: 4 / 3; background: var(--surface, #f1f5f9); transition: box-shadow 0.25s ease, transform 0.25s ease; }
+.gallery-thumb:hover { box-shadow: 0 10px 30px rgba(0,0,0,0.18); transform: translateY(-3px); }
+.gallery-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; transition: transform 0.4s ease; }
+.gallery-thumb:hover img { transform: scale(1.07); }
+.gallery-dialog { border: none; border-radius: 14px; padding: 0; max-width: 90vw; max-height: 90vh; background: #111; overflow: visible; box-shadow: 0 32px 96px rgba(0,0,0,0.75); }
+.gallery-dialog::backdrop { background: rgba(0,0,0,0.88); backdrop-filter: blur(4px); }
+.gallery-dialog-img { display: none; max-width: 85vw; max-height: 82vh; object-fit: contain; border-radius: 10px; vertical-align: middle; }
+.gallery-dialog-img.active { display: block; }
+.gallery-close { position: absolute; top: -16px; right: -16px; background: #fff; border: none; color: #111; font-size: 1rem; font-weight: 700; cursor: pointer; border-radius: 50%; width: 36px; height: 36px; line-height: 36px; text-align: center; z-index: 10; box-shadow: 0 4px 16px rgba(0,0,0,0.3); }
+.gallery-prev, .gallery-next { position: absolute; top: 50%; transform: translateY(-50%); background: rgba(255,255,255,0.15); border: none; color: #fff; font-size: 2.4rem; cursor: pointer; border-radius: 50%; width: 52px; height: 52px; display: flex; align-items: center; justify-content: center; transition: background 0.2s; z-index: 10; }
+.gallery-prev:hover, .gallery-next:hover { background: rgba(255,255,255,0.3); }
+.gallery-prev { left: -26px; }
+.gallery-next { right: -26px; }
+</style>
+
+<script>
+(function() {
+    var dlg = document.getElementById('galleryDialog');
+    var imgs = dlg ? dlg.querySelectorAll('.gallery-dialog-img') : [];
+    var cur = 0;
+    function show(i) { cur = (i + imgs.length) % imgs.length; imgs.forEach(function(img, j) { img.classList.toggle('active', j === cur); }); }
+    window.openGallery = function(i) { show(i); dlg && dlg.showModal(); };
+    window.closeGallery = function() { dlg && dlg.close(); };
+    window.prevImg = function() { show(cur - 1); };
+    window.nextImg = function() { show(cur + 1); };
+    dlg && dlg.addEventListener('click', function(e) { if (e.target === dlg) closeGallery(); });
+    document.addEventListener('keydown', function(e) {
+        if (!dlg || !dlg.open) return;
+        if (e.key === 'ArrowRight') nextImg();
+        else if (e.key === 'ArrowLeft') prevImg();
+        else if (e.key === 'Escape') closeGallery();
+    });
+})();
+</script>`;
+}
+
 // Query the ui-ux-pro-max design intelligence database
 // domain: 'color' | 'typography' | 'style' | 'ux' | 'landing'
 async function queryUXPro(query, domain, n = 1) {
@@ -492,7 +697,24 @@ The CSS should produce designs that look premium, modern, and agency-quality.
 Return ONLY the raw CSS. No markdown, no backticks, no explanation.`,
         }],
     });
-    return resp.content[0].text.trim().replace(/^```css\n?/, '').replace(/\n?```$/, '');
+    const baseCss = resp.content[0].text.trim().replace(/^```css\n?/, '').replace(/\n?```$/, '');
+
+    // Deterministic microinteraction CSS — appended so it's always present
+    const microCSS = `
+
+/* ── Microinteractions ── */
+.card { transition: transform 0.25s ease, box-shadow 0.25s ease; }
+.card:hover { transform: translateY(-5px); box-shadow: 0 20px 48px rgba(0,0,0,0.13); }
+.btn { transition: transform 0.15s ease, background 0.2s ease, box-shadow 0.2s ease, color 0.2s ease; }
+.btn:hover { transform: translateY(-2px); box-shadow: 0 8px 24px rgba(0,0,0,0.18); }
+.gallery-thumb { transition: transform 0.25s ease, box-shadow 0.25s ease; }
+a:not(.btn):not([class*="logo"]):not(.gallery-thumb) { transition: opacity 0.15s ease; }
+a:not(.btn):not([class*="logo"]):not(.gallery-thumb):hover { opacity: 0.72; }
+input:focus, textarea:focus, select:focus { outline: none; box-shadow: 0 0 0 3px rgba(37,99,235,0.25); transition: box-shadow 0.2s; }
+details summary { cursor: pointer; user-select: none; transition: color 0.2s; }
+details summary:hover { color: var(--accent, #f59e0b); }`;
+
+    return baseCss + microCSS;
 }
 
 // ── STEP 2.5: RESPONSIVE CSS (separate call — keeps base CSS call focused) ─
@@ -621,7 +843,7 @@ ${navBlock}
 ${imagesBlock}
 
 SECTIONS FOR THIS PAGE:
-${page.sections.map(s => `- type: ${s.type} (id: ${s.id})`).join('\n')}
+${page.sections.map(s => `- type: ${s.type} → must render as <section id="section-${s.type}" class="section">`).join('\n')}
 
 PLACEHOLDER SCHEMA — use EXACTLY these paths for ALL text. No other text allowed.
 ${schemaBlock}
@@ -637,9 +859,10 @@ RULES:
 7. FAQ: <details><summary> elements.
 8. Images: use existing site images if provided above; otherwise a gradient div (aspect-ratio:16/9).
 9. Footer: dark footer, copyright © ${new Date().getFullYear()} ${analysis.businessName}.
-10. IntersectionObserver JS at bottom: adds class "visible" to .animate elements on scroll.
+10. Do NOT add any scroll animation JS — GSAP ScrollTrigger is injected automatically.
 11. Do NOT add mobile nav script — injected automatically. Do NOT add hamburger JS.
-12. Return ONLY complete HTML from <!DOCTYPE html> to </html>. No fences, no explanation.`,
+12. Stats that are numbers: wrap the value in <span data-count="VALUE">VALUE</span> so counters animate (e.g. <span data-count="150">150</span>+).
+13. Return ONLY complete HTML from <!DOCTYPE html> to </html>. No fences, no explanation.`,
         }],
     });
     const template = resp.content[0].text.trim().replace(/^```html\n?/, '').replace(/\n?```$/, '');
@@ -647,7 +870,23 @@ RULES:
     // Inject real content from sections into template placeholders
     let html = renderTemplate(template, page.sections);
 
-    // Inject deterministic mobile nav script — guaranteed to work regardless of LLM output
+    // ── Inject GSAP + ScrollTrigger CDN ──────────────────────────────────────
+    const gsapCDN = `<script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js" defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/ScrollTrigger.min.js" defer></script>`;
+    html = html.replace('</head>', gsapCDN + '\n</head>');
+
+    // ── Gallery section (home page only, if crawled images available) ─────────
+    if (isHome && imageUrls && imageUrls.length >= 4) {
+        const galleryHtml = buildGallerySection(imageUrls, analysis);
+        // Insert before footer so it sits near the end of main content
+        html = html.replace(/<footer[\s>]/, galleryHtml + '\n<footer ');
+    }
+
+    // ── GSAP animation script (deterministic, based on section types) ─────────
+    const animScript = buildAnimationScript(page, !!heroImageBase64);
+    html = html.replace('</body>', animScript + '\n</body>');
+
+    // ── Mobile nav script (deterministic) ────────────────────────────────────
     const mobileNavScript = `<script>
 (function(){var b=document.getElementById('menuBtn'),n=document.getElementById('navLinks');if(b&&n){b.addEventListener('click',function(){n.classList.toggle('open');b.textContent=n.classList.contains('open')?'✕':'☰';});}})();
 </script>`;
